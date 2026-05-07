@@ -13,7 +13,6 @@ from matplotlib.figure import Figure
 from model import (
     PvmConfig,
     build_pvm_bridge,
-    executive_pvm_headline,
     executive_pvm_table,
     generate_sample_panel,
     pvm_input_template,
@@ -119,17 +118,94 @@ def _waterfall_matplotlib(summary: Dict[str, Any]) -> Figure:
     heights.append(end)
     colors.append(color_total)
 
-    fig, ax = plt.subplots(figsize=(8.2, 3.35), dpi=110)
+    fig, ax = plt.subplots(figsize=(10.0, 4.25), dpi=100)
     x_pos = range(len(step_labels))
     ax.bar(x_pos, heights, bottom=bottoms, color=colors, edgecolor="#333333", linewidth=0.4, width=0.72)
     ax.set_xticks(list(x_pos))
-    ax.set_xticklabels(step_labels, fontsize=8, rotation=0)
+    ax.set_xticklabels(step_labels, fontsize=9, rotation=0)
     ax.axhline(0, color="#999999", linewidth=0.6, linestyle="-")
     ax.set_ylabel("Revenue ($)")
-    ax.set_title("Revenue bridge — Price · Volume · Mix (+ new / discontinued)", fontsize=10.5, pad=8)
+    ax.set_title("Revenue bridge — Price · Volume · Mix (+ new / discontinued)", fontsize=11, pad=12)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda val, _: f"{val:,.0f}"))
-    fig.subplots_adjust(left=0.12, right=0.98, top=0.88, bottom=0.22)
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.90, bottom=0.20)
+    fig.patch.set_facecolor("white")
     return fig
+
+
+def _waterfall_to_image_bytes(fig: Figure) -> bytes:
+    """Rasterize for Streamlit so the full chart is visible (avoids pyplot clipping)."""
+    buf = io.BytesIO()
+    fig.savefig(
+        buf,
+        format="png",
+        dpi=120,
+        bbox_inches="tight",
+        pad_inches=0.35,
+        facecolor="white",
+        edgecolor="none",
+    )
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _render_executive_headline(summary: Dict[str, Any]) -> None:
+    """
+    Executive summary without `$` in markdown — Streamlit parses `$...$` as LaTeX and breaks normal text.
+    """
+    b = str(summary["period_base"])
+    c = str(summary["period_cmp"])
+    e = summary["executive_pvm_usd"]
+    d = float(e["total_revenue_change"])
+    direction = "increased" if d >= 0 else "decreased"
+    disc = float(e["discontinued_skus_impact"])
+
+    st.markdown(
+        f"Compared to **{b}**, revenue in **{c}** **{direction}** by **{abs(d):,.0f} USD** "
+        f"(comparison revenue minus baseline revenue)."
+    )
+
+    st.markdown("**Component impacts** — values in the same currency as your revenue column.")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Price impact", f"{float(e['price_impact']):,.0f}")
+    m2.metric("Volume impact", f"{float(e['volume_impact']):,.0f}")
+    m3.metric("Mix (cross-term)", f"{float(e['mix_impact_cartesian']):,.0f}")
+    m4.metric("New SKUs / markets", f"{float(e['new_skus_impact']):,.0f}")
+    m5.metric("Discontinued", f"{float(e['discontinued_skus_impact']):,.0f}")
+
+    if disc < -1e-6:
+        st.caption("Discontinued is negative by construction (revenue left behind from exited SKUs / keys).")
+
+
+def _style_executive_table(exec_tbl: pd.DataFrame):
+    """Green for positive amounts, red for negative (Amount column only)."""
+
+    def _color_amount(s: pd.Series) -> list[str]:
+        styles: list[str] = []
+        for v in s:
+            if isinstance(v, (int, float)) and pd.notna(v):
+                if v > 0:
+                    styles.append("color: #137333; font-weight: 600;")
+                elif v < 0:
+                    styles.append("color: #c5221f; font-weight: 600;")
+                else:
+                    styles.append("color: #202124;")
+            else:
+                styles.append("")
+        return styles
+
+    def _fmt_amt(x: Any) -> str:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return ""
+        return f"${float(x):,.2f}"
+
+    def _fmt_pct(x: Any) -> str:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return "—"
+        return f"{float(x):.1f}%"
+
+    styler = exec_tbl.style.apply(_color_amount, subset=["Amount ($)"], axis=0)
+    styler = styler.format({"Amount ($)": _fmt_amt, "% of |total Δ|": _fmt_pct})
+    return styler
 
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -287,29 +363,19 @@ if summary and detail is not None:
     s4.metric("Reconciliation |Δ|", f"{chk:,.2f}")
 
     st.subheader("Executive PVM summary (USD)")
-    st.markdown(executive_pvm_headline(summary))
+    _render_executive_headline(summary)
     exec_tbl = executive_pvm_table(summary)
-    disp = exec_tbl.copy()
-    disp["Amount ($)"] = disp["Amount ($)"].map(lambda v: f"{v:,.2f}")
-
-    def _fmt_pct(v: Any) -> str:
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return "—"
-        return f"{float(v):.1f}%"
-
-    disp["% of |total Δ|"] = disp["% of |total Δ|"].map(_fmt_pct)
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    st.dataframe(_style_executive_table(exec_tbl), use_container_width=True, hide_index=True)
     st.caption(
         "**Mix** = Σ (p₁−p₀)(q₁−q₀) on ongoing lines (captures joint price–quantity moves; "
         "in many board decks this bucket is still called *mix* or *cross*). "
         "It is not a separate share-shift index."
     )
 
-    wf_col_left, wf_col_right = st.columns([1.05, 0.95])
-    with wf_col_left:
-        fig = _waterfall_matplotlib(summary)
-        st.pyplot(fig, use_container_width=False)
-        plt.close(fig)
+    st.subheader("Revenue bridge chart")
+    fig = _waterfall_matplotlib(summary)
+    st.image(_waterfall_to_image_bytes(fig), use_container_width=True)
+    plt.close(fig)
 
     if st.session_state.get("pvm_ai_text"):
         st.markdown("**AI insights**")
