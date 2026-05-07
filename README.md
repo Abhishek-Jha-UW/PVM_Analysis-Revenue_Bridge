@@ -2,16 +2,20 @@
 
 Professional-style **price–volume–mix (PVM)** tool for **revenue bridges** at a configurable grain (SKU × optional region × period). Built for analysts who need **auditable** decomposition, charts, exports, and an optional **OpenAI** narrative that uses **computed JSON only** (no invented figures).
 
+## Backup
+
+Prior `app.py` / `model.py` snapshots before the executive PVM refresh live in **`Backup/`**.
+
 ## What it does
 
-1. **Ingest** weekly/monthly/quarterly panel data: period, SKU, revenue, units, optional region.
+1. **Ingest** weekly/monthly/quarterly panel data: period, SKU, revenue, units, optional region. Use the in-app **CSV template** or `data/pvm_input_template.csv`.
 2. **Aggregate** to one row per `(region?, sku)` per period; **price realization** = revenue ÷ units.
-3. **Bridge** comparison vs baseline period:
-   - **Price (at base qty)** · Σ q₀(p₁−p₀)
-   - **Volume (at base price)** · Σ p₀(q₁−q₀)
-   - **Interaction** · Σ Δp·Δq (joint moves; often discussed with “mix”)
+3. **Bridge** comparison vs baseline period (Cartesian PVM on ongoing keys):
+   - **Price impact** · Σ q₀(p₁−p₀)
+   - **Volume impact** · Σ p₀(q₁−q₀)
+   - **Mix impact** · Σ Δp·Δq (cross-term; in many decks still called *mix* or *cross*)
    - **New SKUs** / **discontinued SKUs** · full incremental or lost revenue for keys only in one period
-4. **Visualize** a Plotly waterfall and roll-ups; **export** line-level CSV.
+4. **Visualize** a compact Matplotlib revenue bridge and roll-ups; **export** line-level CSV.
 5. **Optional AI** · executive summary from the structured bridge output (requires `OPENAI_API_KEY`).
 
 ## Run locally

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -208,7 +209,113 @@ def build_pvm_bridge(
         "max_abs_bridge_residual": float(detail["bridge_residual"].abs().max()) if not detail.empty else 0.0,
     }
     summary["revenue_cmp_check"] = summary["revenue_base"] + summary["delta_revenue_total"]
+    # “Mix” in Cartesian PVM = joint price×quantity term (Σ Δp·Δq); sums with price + volume to explain ongoing Δ(pq).
+    summary["mix_effect_total"] = summary["interaction_effect_total"]
+    summary["executive_pvm_usd"] = executive_pvm_usd_dict(summary)
     return detail, summary
+
+
+def executive_pvm_usd_dict(summary: Dict[str, Any]) -> Dict[str, float]:
+    """Plain labels for UI / LLM — all dollars, same signs as the bridge."""
+    return {
+        "price_impact": float(summary["price_effect_total"]),
+        "volume_impact": float(summary["volume_effect_total"]),
+        "mix_impact_cartesian": float(summary["interaction_effect_total"]),
+        "new_skus_impact": float(summary["new_sku_effect_total"]),
+        "discontinued_skus_impact": float(summary["discontinued_sku_effect_total"]),
+        "total_revenue_change": float(summary["delta_revenue_total"]),
+    }
+
+
+def executive_pvm_table(summary: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Business-facing table: explicit $ impact per PVM bucket.
+    Mix = Cartesian cross-term Σ Δp·Δq (standard third piece of Δ(pq); not a separate econometric mix index).
+    """
+    e = summary["executive_pvm_usd"]
+    denom = max(abs(e["total_revenue_change"]), 1e-9)
+    rows = [
+        {
+            "Component": "Price impact",
+            "What it means": "Revenue change if only realized price moved (volumes fixed at baseline).",
+            "Formula": "Σ q₀·(p₁−p₀) on ongoing lines",
+            "Amount ($)": e["price_impact"],
+            "% of |total Δ|": abs(e["price_impact"]) / denom * 100.0,
+        },
+        {
+            "Component": "Volume impact",
+            "What it means": "Revenue change if only units moved (price fixed at baseline).",
+            "Formula": "Σ p₀·(q₁−q₀) on ongoing lines",
+            "Amount ($)": e["volume_impact"],
+            "% of |total Δ|": abs(e["volume_impact"]) / denom * 100.0,
+        },
+        {
+            "Component": "Mix impact",
+            "What it means": "Joint effect when price and quantity move together (Cartesian ‘cross’ term).",
+            "Formula": "Σ (p₁−p₀)·(q₁−q₀) on ongoing lines",
+            "Amount ($)": e["mix_impact_cartesian"],
+            "% of |total Δ|": abs(e["mix_impact_cartesian"]) / denom * 100.0,
+        },
+        {
+            "Component": "New SKUs / markets",
+            "What it means": "Incremental revenue from keys present only in the comparison period.",
+            "Formula": "Σ revenue (comparison) on new keys",
+            "Amount ($)": e["new_skus_impact"],
+            "% of |total Δ|": abs(e["new_skus_impact"]) / denom * 100.0,
+        },
+        {
+            "Component": "Discontinued SKUs / markets",
+            "What it means": "Lost revenue from keys present only in the baseline period.",
+            "Formula": "−Σ revenue (baseline) on exited keys",
+            "Amount ($)": e["discontinued_skus_impact"],
+            "% of |total Δ|": abs(e["discontinued_skus_impact"]) / denom * 100.0,
+        },
+        {
+            "Component": "Total change in revenue",
+            "What it means": "Comparison revenue minus baseline revenue (check vs sum of buckets).",
+            "Formula": "R_cmp − R_base",
+            "Amount ($)": e["total_revenue_change"],
+            "% of |total Δ|": float("nan"),
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def executive_pvm_headline(summary: Dict[str, Any]) -> str:
+    """One paragraph a CFO can skim."""
+    b, c = summary["period_base"], summary["period_cmp"]
+    e = summary["executive_pvm_usd"]
+    d = e["total_revenue_change"]
+    direction = "increased" if d >= 0 else "decreased"
+    disc = e["discontinued_skus_impact"]
+    if disc < -1e-6:
+        disc_phrase = f"**Discontinued** lines **removed ${abs(disc):,.0f}** from the comparison total."
+    elif abs(disc) <= 1e-6:
+        disc_phrase = "No discontinued-line drag in this bridge."
+    else:
+        disc_phrase = ""
+    return (
+        f"Compared to **{b}**, revenue in **{c}** {direction} by **${abs(d):,.0f}**. "
+        f"**Price** contributed **${e['price_impact']:,.0f}**, **volume** **${e['volume_impact']:,.0f}**, "
+        f"and **mix (Cartesian cross-term)** **${e['mix_impact_cartesian']:,.0f}**. "
+        f"**New** offerings added **${e['new_skus_impact']:,.0f}**. {disc_phrase}"
+    )
+
+
+def pvm_input_template() -> pd.DataFrame:
+    """
+    Starter file users can download: required columns + a few example rows.
+    Duplicate keys (same period, region, sku) are summed before the bridge.
+    """
+    return pd.DataFrame(
+        {
+            "period": ["2024Q1", "2024Q1", "2024Q1", "2024Q2", "2024Q2"],
+            "region": ["West", "West", "East", "West", "East"],
+            "sku": ["Widget_12pk", "Widget_24pk", "Widget_12pk", "Widget_12pk", "Widget_12pk"],
+            "revenue": [12000.00, 9000.00, 8000.00, 12650.00, 8350.00],
+            "units": [1500, 750, 1000, 1580, 1020],
+        }
+    )
 
 
 def rollup_by_dimension(
@@ -222,7 +329,7 @@ def rollup_by_dimension(
         delta_revenue=("delta_revenue", "sum"),
         price_effect=("price_effect", "sum"),
         volume_effect=("volume_effect", "sum"),
-        interaction_effect=("interaction_effect", "sum"),
+        mix_effect=("interaction_effect", "sum"),
         new_sku_effect=("new_sku_effect", "sum"),
         discontinued_sku_effect=("discontinued_sku_effect", "sum"),
     ).reset_index()
@@ -242,8 +349,15 @@ def top_movers(detail: pd.DataFrame, n: int = 15) -> pd.DataFrame:
 
 def summary_for_llm(summary: Dict[str, Any], rollup_region: Optional[pd.DataFrame], top_lines: pd.DataFrame) -> Dict[str, Any]:
     """Structured payload for OpenAI — numbers computed here only."""
+    exec_rows = executive_pvm_table(summary).to_dict(orient="records")
+    for row in exec_rows:
+        for k, v in list(row.items()):
+            if isinstance(v, float) and math.isnan(v):
+                row[k] = None
     payload: Dict[str, Any] = {
         "pvm_summary": summary,
+        "executive_pvm_usd": summary.get("executive_pvm_usd", {}),
+        "executive_pvm_table": exec_rows,
         "top_delta_revenue_lines": top_lines.head(10).to_dict(orient="records") if not top_lines.empty else [],
     }
     if rollup_region is not None and not rollup_region.empty:
